@@ -61,6 +61,79 @@ New features:
   * Unit tests covering placement geometry and style round-tripping.
 
 ------------------------------------------------------------------------------
+Modifications by Alpha-Leader, 2026-09-01
+------------------------------------------------------------------------------
+
+New features:
+
+  * Per-application profiles: a placement (and target monitor) can be saved
+    per executable and applied automatically whenever a matching window
+    appears. Auto-apply fires once per window, never fights a manual restore,
+    and asserts the placement a second time shortly after applying, for games
+    that re-take their own size after launch.
+
+  * Global hotkeys (default Ctrl+Alt+B / Ctrl+Alt+R): toggle borderless on the
+    focused window, and restore every stripped window, without switching to
+    the app. Bindings are configurable.
+
+  * System tray: the close button hides the window to the tray by default
+    (configurable), with Show/Hide, Restore all, and Quit in the tray menu,
+    and an option to start minimized.
+
+  * Original window frames persist to disk, so Restore Borders works across a
+    restart of this app, including after a crash: a saved frame is re-attached
+    to a live borderless window matching the same executable and window class.
+    Entries expire after seven days.
+
+  * Monitors are remembered by device name rather than enumeration index, so
+    saved settings and profiles survive monitors being added or removed.
+
+Architectural changes:
+
+  * Window scanning and auto-apply moved from the UI loop to a dedicated
+    watcher thread. eframe stops producing frames while its window is hidden,
+    so nothing that must keep working from the tray runs in the frame loop;
+    window state is shared behind a mutex, and tray/hotkey handlers act
+    directly from the Win32 message pump.
+
+  * The main window is vertically resizable and its content scrolls.
+
+------------------------------------------------------------------------------
+Modifications by Alpha-Leader, 2026-09-01 (continued)
+------------------------------------------------------------------------------
+
+New features:
+
+  * Cursor lock: a per-profile option confines the mouse to a managed
+    window's rectangle while it has focus, re-asserted continuously since
+    Windows silently drops the clip on focus changes and similar events.
+    Ctrl+Alt+L toggles a session-only lock override for whichever window is
+    currently focused, independent of any profile.
+
+  * A focus and topmost watchdog re-asserts a managed window's placement and
+    always-on-top state whenever they decay, debounced so it never fights a
+    deliberate move or resize by the user.
+
+  * Taskbar auto-hide while gaming: an option to auto-hide the taskbar for as
+    long as any window is managed by this app, restoring the prior state
+    exactly when the last one closes or the app exits. A window this app
+    already owns from a previous run (adopted from a persisted frame, or
+    simply still borderless from before) is picked up into management the
+    same way a freshly-applied one is, and a taskbar left auto-hidden by a
+    hard crash is restored on the next launch if nothing is left to manage.
+
+  * Companion dimming: windows marked as companions dim to a configurable
+    brightness while a managed window has focus, and return to full
+    brightness while the mouse hovers them, without touching the game's
+    focus. A window that manages its own transparency is left alone.
+
+Architectural changes:
+
+  * The watcher thread gained a 250ms heartbeat, active only while a session
+    effect (a managed window, an override, a clip, a dim, or a taskbar
+    change) exists, alongside the pre-existing 5-second scan.
+
+------------------------------------------------------------------------------
 
 This program is free software: you can redistribute it and/or modify it under
 the terms of the GNU General Public License version 3, as published by the Free

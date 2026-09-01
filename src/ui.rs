@@ -2,7 +2,10 @@
 // Copyright (C) 2025-2026 Z1xus
 // Copyright (C) 2026 Alpha-Leader
 
-use crate::window_manager::{Anchor, DisplayInfo, Placement, PlacementMode, WindowInfo};
+use crate::{
+    profiles::Profile,
+    window_manager::{Anchor, DisplayInfo, Placement, PlacementMode, WindowInfo},
+};
 use egui::{
     Align, Align2, Color32, ColorImage, FontId, Layout, RichText, Sense, Stroke, Style, Visuals,
 };
@@ -99,9 +102,7 @@ pub fn render_header(ui: &mut egui::Ui, window_count: usize)
 
     ui.with_layout(Layout::top_down(Align::Center), |ui| {
         ui.label(
-            RichText::new(env!("CARGO_PKG_NAME"))
-                .font(FontId::proportional(20.0))
-                .color(TEXT),
+            RichText::new(env!("CARGO_PKG_NAME")).font(FontId::proportional(20.0)).color(TEXT),
         );
 
         ui.add_space(15.0);
@@ -112,11 +113,7 @@ pub fn render_header(ui: &mut egui::Ui, window_count: usize)
             format!("{} windows found", window_count)
         };
 
-        ui.label(
-            RichText::new(counter_text)
-                .font(FontId::proportional(12.0))
-                .color(TEXT_DIM),
-        );
+        ui.label(RichText::new(counter_text).font(FontId::proportional(12.0)).color(TEXT_DIM));
     });
 
     ui.add_space(10.0);
@@ -130,11 +127,7 @@ pub fn render_window_selector(
 )
 {
     ui.horizontal(|ui| {
-        ui.label(
-            RichText::new("Select Window:")
-                .font(FontId::proportional(13.0))
-                .color(TEXT_DIM),
-        );
+        ui.label(RichText::new("Select Window:").font(FontId::proportional(13.0)).color(TEXT_DIM));
     });
 
     ui.add_space(5.0);
@@ -175,11 +168,7 @@ pub fn render_window_selector(
                             ui.allocate_exact_size(egui::vec2(16.0, 16.0), Sense::hover());
 
                         let status_icon = "○";
-                        let status_color = if window.is_borderless {
-                            SUCCESS
-                        } else {
-                            TEXT_DIM
-                        };
+                        let status_color = if window.is_borderless { SUCCESS } else { TEXT_DIM };
 
                         ui.painter().text(
                             rect.center(),
@@ -191,11 +180,7 @@ pub fn render_window_selector(
                     }
 
                     let status_text = if window.is_borderless { "[B]" } else { "[W]" };
-                    let status_color = if window.is_borderless {
-                        SUCCESS
-                    } else {
-                        TEXT_FAINT
-                    };
+                    let status_color = if window.is_borderless { SUCCESS } else { TEXT_FAINT };
 
                     ui.label(
                         RichText::new(status_text)
@@ -234,11 +219,7 @@ pub fn render_placement_controls(
 
     ui.horizontal(|ui| {
         ui.add_space(5.0);
-        ui.label(
-            RichText::new("Placement:")
-                .font(FontId::proportional(12.0))
-                .color(TEXT_DIM),
-        );
+        ui.label(RichText::new("Placement:").font(FontId::proportional(12.0)).color(TEXT_DIM));
 
         ui.selectable_value(&mut placement.mode, PlacementMode::FullDisplay, "Full display");
         ui.selectable_value(&mut placement.mode, PlacementMode::Region, "Region");
@@ -254,11 +235,7 @@ pub fn render_placement_controls(
 
         ui.horizontal(|ui| {
             ui.add_space(5.0);
-            ui.label(
-                RichText::new("Size:")
-                    .font(FontId::proportional(12.0))
-                    .color(TEXT_DIM),
-            );
+            ui.label(RichText::new("Size:").font(FontId::proportional(12.0)).color(TEXT_DIM));
             ui.add(egui::DragValue::new(&mut placement.width).range(1..=32768).speed(8.0));
             ui.label("x");
             ui.add(egui::DragValue::new(&mut placement.height).range(1..=32768).speed(8.0));
@@ -280,11 +257,7 @@ pub fn render_placement_controls(
 
         ui.horizontal(|ui| {
             ui.add_space(5.0);
-            ui.label(
-                RichText::new("Anchor:")
-                    .font(FontId::proportional(12.0))
-                    .color(TEXT_DIM),
-            );
+            ui.label(RichText::new("Anchor:").font(FontId::proportional(12.0)).color(TEXT_DIM));
             ui.selectable_value(&mut placement.anchor, Anchor::Centered, "Centered");
             ui.selectable_value(&mut placement.anchor, Anchor::Left, "Left");
             ui.selectable_value(&mut placement.anchor, Anchor::Right, "Right");
@@ -295,11 +268,7 @@ pub fn render_placement_controls(
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.add_space(5.0);
-                ui.label(
-                    RichText::new("Offset:")
-                        .font(FontId::proportional(12.0))
-                        .color(TEXT_DIM),
-                );
+                ui.label(RichText::new("Offset:").font(FontId::proportional(12.0)).color(TEXT_DIM));
                 ui.add(egui::DragValue::new(&mut placement.custom_x).speed(8.0).prefix("x "));
                 ui.add(egui::DragValue::new(&mut placement.custom_y).speed(8.0).prefix("y "));
             });
@@ -311,15 +280,11 @@ pub fn render_placement_controls(
     ui.horizontal(|ui| {
         ui.add_space(5.0);
         ui.add(egui::Checkbox::new(&mut placement.always_on_top, ""));
-        ui.label(
-            RichText::new("Always on top")
-                .font(FontId::proportional(12.0))
-                .color(TEXT_DIM),
-        )
-        .on_hover_text(
-            "Required to cover the taskbar. Windows only hides the taskbar for a window \
+        ui.label(RichText::new("Always on top").font(FontId::proportional(12.0)).color(TEXT_DIM))
+            .on_hover_text(
+                "Required to cover the taskbar. Windows only hides the taskbar for a window \
              that fills an entire monitor.",
-        );
+            );
     });
 
     render_placement_preview(ui, placement, display);
@@ -327,11 +292,7 @@ pub fn render_placement_controls(
 
 /// Live readout of exactly where the window will land, so the numbers can be
 /// checked before anything is moved.
-fn render_placement_preview(
-    ui: &mut egui::Ui,
-    placement: &Placement,
-    display: Option<&DisplayInfo>,
-)
+fn render_placement_preview(ui: &mut egui::Ui, placement: &Placement, display: Option<&DisplayInfo>)
 {
     let Some(display) = display else {
         return;
@@ -357,8 +318,7 @@ fn render_placement_preview(
 
     let summary = format!("→ {}x{} at ({}, {})", width, height, rect.left, rect.top);
 
-    let color =
-        if overflows { WARNING } else { SUCCESS };
+    let color = if overflows { WARNING } else { SUCCESS };
 
     ui.horizontal(|ui| {
         ui.add_space(5.0);
@@ -375,10 +335,297 @@ fn render_placement_preview(
 
     ui.horizontal(|ui| {
         ui.add_space(5.0);
-        ui.label(
-            RichText::new(detail).font(FontId::proportional(11.0)).color(TEXT_FAINT),
-        );
+        ui.label(RichText::new(detail).font(FontId::proportional(11.0)).color(TEXT_FAINT));
     });
+}
+
+/// What the user did in the profiles section this frame. Returned rather than
+/// acted on, so this module stays render-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileAction
+{
+    None,
+    /// A field was edited in place (the auto-apply checkbox); needs a save.
+    Changed,
+    /// Save the current placement as a profile for the selected window's exe.
+    Save,
+    Apply(usize),
+    Delete(usize),
+}
+
+pub fn render_profiles(
+    ui: &mut egui::Ui,
+    profiles: &mut [Profile],
+    selected_exe: Option<&str>,
+) -> ProfileAction
+{
+    let mut action = ProfileAction::None;
+
+    ui.add_space(8.0);
+
+    let header = RichText::new(format!("Profiles ({})", profiles.len()))
+        .font(FontId::proportional(12.0))
+        .color(TEXT_DIM);
+
+    egui::CollapsingHeader::new(header)
+        .id_salt("profiles_section")
+        .default_open(!profiles.is_empty())
+        .show(ui, |ui| {
+            match selected_exe {
+                Some(exe) => {
+                    if ui
+                        .small_button(format!("Save profile for {}", exe))
+                        .on_hover_text(
+                            "Remembers the current placement and display for this \
+                             application. Auto-apply fixes it whenever its window appears.",
+                        )
+                        .clicked()
+                    {
+                        action = ProfileAction::Save;
+                    }
+                },
+                None => {
+                    ui.label(
+                        RichText::new("Select a window to save a profile for it")
+                            .font(FontId::proportional(11.0))
+                            .color(TEXT_FAINT),
+                    );
+                },
+            }
+
+            if !profiles.is_empty() {
+                ui.add_space(6.0);
+            }
+
+            for (index, profile) in profiles.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    if ui
+                        .checkbox(&mut profile.auto_apply, "")
+                        .on_hover_text("Apply automatically when a matching window appears")
+                        .changed()
+                    {
+                        action = ProfileAction::Changed;
+                    }
+
+                    ui.label(
+                        RichText::new(&profile.exe).font(FontId::proportional(12.0)).color(TEXT),
+                    );
+
+                    let lock_response = ui.selectable_label(profile.cursor_lock, "🖱");
+                    if lock_response
+                        .on_hover_text("Confine the cursor to this window while it has focus")
+                        .clicked()
+                    {
+                        profile.cursor_lock = !profile.cursor_lock;
+                        action = ProfileAction::Changed;
+                    }
+
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.small_button("✕").on_hover_text("Delete this profile").clicked() {
+                            action = ProfileAction::Delete(index);
+                        }
+
+                        if ui
+                            .small_button("Apply")
+                            .on_hover_text("Apply this profile to the selected window")
+                            .clicked()
+                        {
+                            action = ProfileAction::Apply(index);
+                        }
+                    });
+                });
+            }
+        });
+
+    action
+}
+
+/// Mutable borrows of the settings shown in the Options section, grouped so
+/// the render function does not accumulate an unmanageable parameter list.
+pub struct OptionsUi<'a>
+{
+    pub close_to_tray: &'a mut bool,
+    pub start_minimized: &'a mut bool,
+    pub taskbar_autohide: &'a mut bool,
+    pub dim_enabled: &'a mut bool,
+    pub dim_alpha_pct: &'a mut u8,
+    pub hotkey_toggle: &'a str,
+    pub hotkey_restore_all: &'a str,
+    pub hotkey_cursor_lock: &'a str,
+}
+
+/// Tray, hotkey, and gaming-session settings. Returns true when something
+/// changed and the config should be saved.
+pub fn render_options(ui: &mut egui::Ui, options: OptionsUi<'_>) -> bool
+{
+    let mut changed = false;
+
+    ui.add_space(4.0);
+
+    let header = RichText::new("Options").font(FontId::proportional(12.0)).color(TEXT_DIM);
+
+    egui::CollapsingHeader::new(header).id_salt("options_section").default_open(false).show(
+        ui,
+        |ui| {
+            ui.horizontal(|ui| {
+                changed |= ui.checkbox(options.close_to_tray, "").changed();
+                ui.label(
+                    RichText::new("Close to tray").font(FontId::proportional(12.0)).color(TEXT_DIM),
+                )
+                .on_hover_text(
+                    "The close button hides the window to the tray instead of \
+                     quitting; auto-apply and hotkeys keep working. Quit from the \
+                     tray menu.",
+                );
+            });
+
+            ui.horizontal(|ui| {
+                changed |= ui.checkbox(options.start_minimized, "").changed();
+                ui.label(
+                    RichText::new("Start minimized to tray")
+                        .font(FontId::proportional(12.0))
+                        .color(TEXT_DIM),
+                );
+            });
+
+            ui.add_space(6.0);
+
+            ui.horizontal(|ui| {
+                changed |= ui.checkbox(options.taskbar_autohide, "").changed();
+                ui.label(
+                    RichText::new("Auto-hide taskbar while gaming")
+                        .font(FontId::proportional(12.0))
+                        .color(TEXT_DIM),
+                )
+                .on_hover_text(
+                    "Hides the taskbar while any window is managed by this app, so a \
+                     notification flash cannot draw over it. Restored when the last \
+                     managed window closes or the app exits.",
+                );
+            });
+
+            ui.horizontal(|ui| {
+                changed |= ui.checkbox(options.dim_enabled, "").changed();
+                ui.label(
+                    RichText::new("Dim companion windows while gaming")
+                        .font(FontId::proportional(12.0))
+                        .color(TEXT_DIM),
+                )
+                .on_hover_text(
+                    "Dims windows marked as companions while a managed window has \
+                     focus. Hovering a dimmed window brings it back to full brightness.",
+                );
+            });
+
+            if *options.dim_enabled {
+                ui.horizontal(|ui| {
+                    ui.add_space(20.0);
+                    ui.label(
+                        RichText::new("Brightness:")
+                            .font(FontId::proportional(11.0))
+                            .color(TEXT_FAINT),
+                    );
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(options.dim_alpha_pct)
+                                .range(10..=100)
+                                .suffix("%")
+                                .speed(1.0),
+                        )
+                        .changed();
+                });
+            }
+
+            ui.add_space(4.0);
+
+            ui.label(
+                RichText::new(format!(
+                    "{} — borderless on focused window\n\
+                     {} — restore all windows\n\
+                     {} — toggle cursor lock on focused window",
+                    options.hotkey_toggle, options.hotkey_restore_all, options.hotkey_cursor_lock,
+                ))
+                .font(FontId::proportional(11.0))
+                .color(TEXT_FAINT),
+            )
+            .on_hover_text("Global hotkeys. Editable in config.txt.");
+        },
+    );
+
+    changed
+}
+
+/// What the user did in the companions section this frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompanionAction
+{
+    None,
+    /// Mark the selected window's executable as a companion.
+    Add,
+    Remove(usize),
+}
+
+pub fn render_companions(
+    ui: &mut egui::Ui,
+    companions: &[String],
+    selected_exe: Option<&str>,
+) -> CompanionAction
+{
+    let mut action = CompanionAction::None;
+
+    ui.add_space(8.0);
+
+    let header = RichText::new(format!("Companions ({})", companions.len()))
+        .font(FontId::proportional(12.0))
+        .color(TEXT_DIM);
+
+    egui::CollapsingHeader::new(header).id_salt("companions_section").default_open(false).show(
+        ui,
+        |ui| {
+            ui.label(
+                RichText::new(
+                    "Windows dimmed while a game has focus — chat, a browser, a stats \
+                     page in the side strips of an ultrawide.",
+                )
+                .font(FontId::proportional(11.0))
+                .color(TEXT_FAINT),
+            );
+            ui.add_space(4.0);
+
+            match selected_exe {
+                Some(exe) => {
+                    if ui.small_button(format!("Mark {} as companion", exe)).clicked() {
+                        action = CompanionAction::Add;
+                    }
+                },
+                None => {
+                    ui.label(
+                        RichText::new("Select a window to mark it as a companion")
+                            .font(FontId::proportional(11.0))
+                            .color(TEXT_FAINT),
+                    );
+                },
+            }
+
+            if !companions.is_empty() {
+                ui.add_space(6.0);
+            }
+
+            for (index, exe) in companions.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(exe).font(FontId::proportional(12.0)).color(TEXT));
+
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.small_button("✕").on_hover_text("Remove this companion").clicked() {
+                            action = CompanionAction::Remove(index);
+                        }
+                    });
+                });
+            }
+        },
+    );
+
+    action
 }
 
 pub fn render_display_selector(
@@ -392,11 +639,7 @@ pub fn render_display_selector(
     ui.horizontal(|ui| {
         ui.add_space(5.0);
 
-        ui.label(
-            RichText::new("Display:")
-                .font(FontId::proportional(12.0))
-                .color(TEXT_DIM),
-        );
+        ui.label(RichText::new("Display:").font(FontId::proportional(12.0)).color(TEXT_DIM));
     });
 
     ui.add_space(3.0);
@@ -443,8 +686,7 @@ pub fn render_action_button(
 
     let mut clicked_window = None;
 
-    let selected =
-        selected_hwnd.and_then(|hwnd| windows.iter().find(|window| window.hwnd == hwnd));
+    let selected = selected_hwnd.and_then(|hwnd| windows.iter().find(|window| window.hwnd == hwnd));
 
     let (button_text, button_enabled) = match selected {
         Some(_) if can_restore => ("Restore Borders", true),
@@ -456,9 +698,9 @@ pub fn render_action_button(
     ui.with_layout(Layout::top_down(Align::Center), |ui| {
         ui.add_enabled_ui(button_enabled, |ui| {
             let button = egui::Button::new(
-                RichText::new(button_text).font(FontId::proportional(14.0)).color(
-                    if button_enabled { TEXT } else { TEXT_DISABLED },
-                ),
+                RichText::new(button_text)
+                    .font(FontId::proportional(14.0))
+                    .color(if button_enabled { TEXT } else { TEXT_DISABLED }),
             )
             .min_size(egui::vec2(180.0, 35.0));
 
@@ -517,11 +759,7 @@ pub fn render_status(ui: &mut egui::Ui, message: &str, is_error: bool)
 {
     ui.add_space(8.0);
 
-    let color = if is_error {
-        ERROR
-    } else {
-        SUCCESS
-    };
+    let color = if is_error { ERROR } else { SUCCESS };
 
     ui.with_layout(Layout::top_down(Align::Center), |ui| {
         ui.label(RichText::new(message).font(FontId::proportional(11.0)).color(color));

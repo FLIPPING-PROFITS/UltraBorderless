@@ -1,6 +1,6 @@
 [package]
 name = "ultraborderless"
-version = "1.2.1"
+version = "1.4.0"
 edition = "2024"
 description = "Windows utility for making any window borderless and placing it into a region of a monitor, sized and anchored how you want."
 authors = ["Alpha-Leader"]
@@ -26,6 +26,8 @@ windows = { version = "0.61", features = [
 ] }
 anyhow = { version = "1.0", default-features = false }
 image = { version = "0.25", default-features = false, features = ["ico", "png"] }
+global-hotkey = "0.7"
+tray-icon = "0.21"
 
 [build-dependencies]
 embed-resource = { version = "3.0", default-features = false }

@@ -9,16 +9,27 @@
 
 mod app;
 mod config;
+mod frames;
+mod hotkeys;
+mod profiles;
+mod service;
+mod session;
 mod ui;
 mod window_manager;
 
 use app::{BorderlessApp, create_app_options};
+use config::Config;
 
 fn main() -> Result<(), eframe::Error>
 {
+    // Loaded before the window exists: start_minimized decides whether the
+    // window is created visible at all.
+    let config = Config::load();
+    let options = create_app_options(&config);
+
     eframe::run_native(
         env!("CARGO_PKG_NAME"),
-        create_app_options(),
-        Box::new(|cc| Ok(Box::new(BorderlessApp::new(cc)))),
+        options,
+        Box::new(|cc| Ok(Box::new(BorderlessApp::new(cc, config)))),
     )
 }

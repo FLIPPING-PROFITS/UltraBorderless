@@ -2,37 +2,42 @@
 // Copyright (C) 2025-2026 Z1xus
 // Copyright (C) 2026 Alpha-Leader
 
-use std::{
-    collections::HashMap,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+use crate::{
+    frames::{self, PersistedFrame},
+    profiles::exe_key,
 };
-use windows::{
-    Win32::{
-    Foundation::{CloseHandle, HWND, LPARAM, RECT, WPARAM},
-    Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWINDOWATTRIBUTE, DwmSetWindowAttribute},
-    Graphics::Gdi::{
-        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleBitmap, CreateCompatibleDC,
-        DIB_RGB_COLORS, DeleteDC, DeleteObject, EnumDisplayMonitors, GetDC, GetDIBits,
-        GetMonitorInfoW, HBITMAP, HDC, HGDIOBJ, HMONITOR, MONITORINFO, ReleaseDC, SelectObject,
+use std::collections::HashMap;
+use windows::Win32::{
+    Foundation::{COLORREF, CloseHandle, HWND, LPARAM, POINT, RECT, WPARAM},
+    Graphics::{
+        Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWINDOWATTRIBUTE, DwmSetWindowAttribute},
+        Gdi::{
+            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleBitmap, CreateCompatibleDC,
+            DIB_RGB_COLORS, DeleteDC, DeleteObject, EnumDisplayMonitors, GetDC, GetDIBits,
+            GetMonitorInfoW, HBITMAP, HDC, HGDIOBJ, HMONITOR, MONITORINFO, MONITORINFOEXW,
+            ReleaseDC, SelectObject,
+        },
     },
     System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
         TH32CS_SNAPPROCESS,
     },
-    UI::WindowsAndMessaging::{
-        DrawIconEx, EnumWindows, FindWindowW, GCLP_HICON, GWL_EXSTYLE, GWL_STYLE,
-        GetClassLongPtrW, GetWindowLongW, GetWindowRect, GetWindowTextW,
-        GetWindowThreadProcessId, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, ICON_SMALL, IsWindow,
-        IsWindowVisible, MONITORINFOF_PRIMARY, SET_WINDOW_POS_FLAGS, SMTO_ABORTIFHUNG,
-        SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageTimeoutW,
-        SetWindowLongW, SetWindowPos, WM_GETICON, WS_BORDER, WS_CAPTION, WS_DLGFRAME,
-        WS_EX_TOPMOST, WS_THICKFRAME,
+    UI::{
+        Shell::{
+            ABM_GETSTATE, ABM_SETSTATE, ABS_ALWAYSONTOP, ABS_AUTOHIDE, APPBARDATA, SHAppBarMessage,
+        },
+        WindowsAndMessaging::{
+            ClipCursor, DrawIconEx, EnumWindows, GA_ROOT, GCLP_HICON, GWL_EXSTYLE, GWL_STYLE,
+            GetAncestor, GetClassLongPtrW, GetClassNameW, GetCursorPos, GetForegroundWindow,
+            GetWindowLongW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
+            HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, ICON_SMALL, IsWindow, IsWindowVisible,
+            LWA_ALPHA, MONITORINFOF_PRIMARY, SET_WINDOW_POS_FLAGS, SMTO_ABORTIFHUNG, SW_HIDE,
+            SW_RESTORE, SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+            SendMessageTimeoutW, SetForegroundWindow, SetLayeredWindowAttributes, SetWindowLongW,
+            SetWindowPos, ShowWindow, WM_GETICON, WS_BORDER, WS_CAPTION, WS_DLGFRAME,
+            WS_EX_LAYERED, WS_EX_TOPMOST, WS_THICKFRAME, WindowFromPoint,
+        },
     },
-    },
-    core::PCWSTR,
 };
 
 /// Bits cleared when making a window borderless.
@@ -50,6 +55,7 @@ pub struct WindowInfo
     pub hwnd: isize,
     pub title: String,
     pub process_name: String,
+    pub class_name: String,
     pub is_borderless: bool,
     pub icon_data: Option<Vec<u8>>,
 }
@@ -58,11 +64,37 @@ pub struct WindowInfo
 pub struct DisplayInfo
 {
     pub name: String,
+    /// The adapter device name (`\\.\DISPLAY1`), which survives monitors being
+    /// added or removed, unlike a position in the enumeration order.
+    pub device_name: String,
     pub x: i32,
     pub y: i32,
     pub width: i32,
     pub height: i32,
     pub is_primary: bool,
+}
+
+/// Finds the display a saved setting referred to: by device name first, falling
+/// back to the saved index (clamped), and finally to the primary display.
+pub fn resolve_display<'a>(
+    displays: &'a [DisplayInfo],
+    device_name: &str,
+    index_fallback: usize,
+) -> Option<&'a DisplayInfo>
+{
+    if displays.is_empty() {
+        return None;
+    }
+
+    if !device_name.is_empty()
+        && let Some(display) = displays.iter().find(|d| d.device_name == device_name)
+    {
+        return Some(display);
+    }
+
+    displays
+        .get(index_fallback.min(displays.len() - 1))
+        .or_else(|| displays.iter().find(|d| d.is_primary))
 }
 
 /// A window's frame as it was before we stripped it, so it can be put back exactly.
@@ -72,6 +104,18 @@ struct OriginalFrame
     style: u32,
     rect: RECT,
     was_topmost: bool,
+}
+
+/// An original frame plus the identity needed to persist it across a restart
+/// of this app, when the window handle it was keyed by is meaningless.
+#[derive(Debug, Clone)]
+struct SavedFrame
+{
+    frame: OriginalFrame,
+    /// Normalized exe stem; empty when the window was not in the last scan.
+    exe: String,
+    class: String,
+    saved_at: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,9 +179,7 @@ impl Placement
     {
         let (x, y, width, height) = match self.mode {
             PlacementMode::LeaveInPlace => return None,
-            PlacementMode::FullDisplay => {
-                (display.x, display.y, display.width, display.height)
-            }
+            PlacementMode::FullDisplay => (display.x, display.y, display.width, display.height),
             PlacementMode::Region => {
                 let width = self.width.max(1);
                 let height = self.height.max(1);
@@ -155,7 +197,7 @@ impl Placement
                 };
 
                 (x, y, width, height)
-            }
+            },
         };
 
         Some(RECT { left: x, top: y, right: x + width, bottom: y + height })
@@ -171,7 +213,7 @@ impl Placement
                     || rect.top < display.y
                     || rect.right > display.x + display.width
                     || rect.bottom > display.y + display.height
-            }
+            },
             None => false,
         }
     }
@@ -183,17 +225,6 @@ struct EnumContext
 {
     windows: Vec<WindowInfo>,
     processes: HashMap<u32, String>,
-}
-
-/// Clears the in-progress flag however the refresh thread exits.
-struct RefreshGuard(Arc<AtomicBool>);
-
-impl Drop for RefreshGuard
-{
-    fn drop(&mut self)
-    {
-        self.0.store(false, Ordering::Release);
-    }
 }
 
 impl WindowInfo
@@ -233,8 +264,30 @@ impl DisplayInfo
 pub struct WindowManager
 {
     windows: Vec<WindowInfo>,
-    refresh_in_progress: Arc<AtomicBool>,
-    original_frames: HashMap<isize, OriginalFrame>,
+    original_frames: HashMap<isize, SavedFrame>,
+    /// Frames loaded from disk that have not been matched to a live window
+    /// yet. Adopted during scans; never used to invent a restore for a window
+    /// that does not match.
+    orphaned_frames: Vec<PersistedFrame>,
+    /// Off in tests; on in the running app once persistence is enabled.
+    persist: bool,
+}
+
+/// Enumerates the current top-level windows. Safe to call from any thread; the
+/// watcher thread owns the cadence.
+pub fn scan_windows() -> Vec<WindowInfo>
+{
+    let mut context = EnumContext { windows: Vec::new(), processes: build_process_map() };
+
+    unsafe {
+        if EnumWindows(Some(enum_windows_proc), LPARAM(&mut context as *mut EnumContext as isize))
+            .is_ok()
+        {
+            context.windows.sort_by(|a: &WindowInfo, b: &WindowInfo| a.title.cmp(&b.title));
+        }
+    }
+
+    context.windows
 }
 
 impl WindowManager
@@ -243,47 +296,18 @@ impl WindowManager
     {
         Self {
             windows: Vec::new(),
-            refresh_in_progress: Arc::new(AtomicBool::new(false)),
             original_frames: HashMap::new(),
+            orphaned_frames: Vec::new(),
+            persist: false,
         }
     }
 
-    /// Starts a background enumeration. Returns `None` if one is already running,
-    /// so the caller never holds a receiver that will not produce a value.
-    pub fn refresh_windows_async(&self) -> Option<std::sync::mpsc::Receiver<Vec<WindowInfo>>>
+    /// Turns on frame persistence and loads any frames a previous run left
+    /// behind. Not part of `new` so tests never touch the real file.
+    pub fn enable_frame_persistence(&mut self)
     {
-        let refresh_flag = Arc::clone(&self.refresh_in_progress);
-
-        if refresh_flag
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            return None;
-        }
-
-        let (sender, receiver) = std::sync::mpsc::channel();
-
-        std::thread::spawn(move || {
-            let _guard = RefreshGuard(refresh_flag);
-
-            let mut context =
-                EnumContext { windows: Vec::new(), processes: build_process_map() };
-
-            unsafe {
-                if EnumWindows(
-                    Some(enum_windows_proc),
-                    LPARAM(&mut context as *mut EnumContext as isize),
-                )
-                .is_ok()
-                {
-                    context.windows.sort_by(|a: &WindowInfo, b: &WindowInfo| a.title.cmp(&b.title));
-                }
-            }
-
-            let _ = sender.send(context.windows);
-        });
-
-        Some(receiver)
+        self.persist = true;
+        self.orphaned_frames = frames::load();
     }
 
     pub fn get_windows(&self) -> &[WindowInfo]
@@ -296,9 +320,104 @@ impl WindowManager
         self.windows = windows;
 
         // Drop saved frames for windows that no longer exist, so the map cannot
-        // grow without bound over a long session.
-        self.original_frames
-            .retain(|hwnd, _| unsafe { IsWindow(Some(as_hwnd(*hwnd))).as_bool() });
+        // grow without bound over a long session. A window seen dying while we
+        // run needs no crash recovery, so its persisted entry goes too.
+        let before = self.original_frames.len();
+        self.original_frames.retain(|hwnd, _| unsafe { IsWindow(Some(as_hwnd(*hwnd))).as_bool() });
+        if self.original_frames.len() != before {
+            self.persist_frames();
+        }
+
+        self.adopt_orphaned_frames();
+    }
+
+    /// Re-attaches frames persisted by a previous run to live windows that are
+    /// currently borderless and match on executable and window class — the
+    /// post-crash "Restore Borders still works" path.
+    fn adopt_orphaned_frames(&mut self)
+    {
+        if self.orphaned_frames.is_empty() {
+            return;
+        }
+
+        let candidates: Vec<(isize, String, String)> = self
+            .windows
+            .iter()
+            .filter(|w| w.is_borderless && !self.original_frames.contains_key(&w.hwnd))
+            .map(|w| (w.hwnd, exe_key(&w.process_name), w.class_name.clone()))
+            .collect();
+
+        let mut adopted = false;
+
+        for (hwnd, exe, class) in candidates {
+            let Some(position) = self
+                .orphaned_frames
+                .iter()
+                .position(|orphan| orphan.exe == exe && orphan.class == class)
+            else {
+                continue;
+            };
+
+            let orphan = self.orphaned_frames.remove(position);
+            self.original_frames.insert(
+                hwnd,
+                SavedFrame {
+                    frame: OriginalFrame {
+                        style: orphan.style,
+                        rect: RECT {
+                            left: orphan.rect.0,
+                            top: orphan.rect.1,
+                            right: orphan.rect.2,
+                            bottom: orphan.rect.3,
+                        },
+                        was_topmost: orphan.topmost,
+                    },
+                    exe: orphan.exe,
+                    class: orphan.class,
+                    saved_at: orphan.saved_at,
+                },
+            );
+            adopted = true;
+        }
+
+        if adopted {
+            self.persist_frames();
+        }
+    }
+
+    /// Writes the current saved frames (and still-unmatched orphans) to disk.
+    /// Best effort and cheap; called whenever the frame map changes.
+    fn persist_frames(&self)
+    {
+        if !self.persist {
+            return;
+        }
+
+        let mut records: Vec<PersistedFrame> = self
+            .original_frames
+            .values()
+            .filter(|saved| !saved.exe.is_empty() && !saved.class.is_empty())
+            .map(|saved| PersistedFrame {
+                exe: saved.exe.clone(),
+                class: saved.class.clone(),
+                style: saved.frame.style,
+                rect: (
+                    saved.frame.rect.left,
+                    saved.frame.rect.top,
+                    saved.frame.rect.right,
+                    saved.frame.rect.bottom,
+                ),
+                topmost: saved.frame.was_topmost,
+                saved_at: saved.saved_at,
+            })
+            .collect();
+
+        records.extend(self.orphaned_frames.iter().cloned());
+
+        // Newest first, so the size cap drops the oldest entries.
+        records.sort_by(|a, b| b.saved_at.cmp(&a.saved_at));
+
+        frames::save(&records);
     }
 
     /// Whether this app stripped the given window and can put it back exactly.
@@ -357,13 +476,15 @@ impl WindowManager
                 anyhow::bail!("could not read window style");
             }
 
-            if let Some(original) = self.original_frames.remove(&hwnd) {
+            if let Some(saved) = self.original_frames.remove(&hwnd) {
+                self.persist_frames();
+
+                let original = saved.frame;
                 SetWindowLongW(handle, GWL_STYLE, original.style as i32);
 
                 // Put the window back in its original band. SWP_NOZORDER must be
                 // absent for the insert-after handle to take effect.
-                let restore_z =
-                    if original.was_topmost { HWND_TOPMOST } else { HWND_NOTOPMOST };
+                let restore_z = if original.was_topmost { HWND_TOPMOST } else { HWND_NOTOPMOST };
 
                 SetWindowPos(
                     handle,
@@ -385,11 +506,27 @@ impl WindowManager
             let mut rect = RECT::default();
             GetWindowRect(handle, &mut rect)?;
 
-            let was_topmost =
-                (GetWindowLongW(handle, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0) != 0;
+            let was_topmost = (GetWindowLongW(handle, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0) != 0;
 
-            self.original_frames
-                .insert(hwnd, OriginalFrame { style: current_style, rect, was_topmost });
+            // Identity for persistence; empty when the window was not in the
+            // last scan (persisting is then skipped for it).
+            let (exe, class) = self
+                .windows
+                .iter()
+                .find(|w| w.hwnd == hwnd)
+                .map(|w| (exe_key(&w.process_name), w.class_name.clone()))
+                .unwrap_or_default();
+
+            self.original_frames.insert(
+                hwnd,
+                SavedFrame {
+                    frame: OriginalFrame { style: current_style, rect, was_topmost },
+                    exe,
+                    class,
+                    saved_at: frames::unix_now(),
+                },
+            );
+            self.persist_frames();
 
             SetWindowLongW(handle, GWL_STYLE, (current_style & !BORDER_STYLES) as i32);
 
@@ -428,11 +565,297 @@ impl WindowManager
 
         Ok(())
     }
+
+    /// Re-asserts a placement on a window this app already stripped, without
+    /// touching the saved frame. Some games re-take their own size shortly
+    /// after launch; this puts them back where the profile says.
+    pub fn reapply_placement(
+        &self,
+        hwnd: isize,
+        placement: &Placement,
+        selected_display: Option<&DisplayInfo>,
+    ) -> anyhow::Result<()>
+    {
+        let handle = as_hwnd(hwnd);
+
+        unsafe {
+            if !IsWindow(Some(handle)).as_bool() {
+                anyhow::bail!("window no longer exists");
+            }
+
+            // The game may have re-added its frame along with its size.
+            let current_style = GetWindowLongW(handle, GWL_STYLE) as u32;
+            if (current_style & BORDER_STYLES) != 0 {
+                SetWindowLongW(handle, GWL_STYLE, (current_style & !BORDER_STYLES) as i32);
+            }
+
+            let (insert_after, z_flag) = if placement.always_on_top {
+                (HWND_TOPMOST, SET_WINDOW_POS_FLAGS(0))
+            } else {
+                (HWND_TOP, SWP_NOZORDER)
+            };
+
+            match selected_display.and_then(|display| placement.resolve(display)) {
+                Some(rect) => SetWindowPos(
+                    handle,
+                    Some(insert_after),
+                    rect.left,
+                    rect.top,
+                    rect.right - rect.left,
+                    rect.bottom - rect.top,
+                    SWP_FRAMECHANGED | z_flag,
+                )?,
+                None => SetWindowPos(
+                    handle,
+                    Some(insert_after),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | z_flag,
+                )?,
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Restores every window this app stripped. Returns how many were restored.
+    pub fn restore_all(&mut self) -> usize
+    {
+        let saved: Vec<isize> = self.original_frames.keys().copied().collect();
+        let mut restored = 0;
+
+        for hwnd in saved {
+            // The restore path ignores placement and display entirely.
+            if self.toggle_borderless(hwnd, &Placement::default(), None).is_ok() {
+                restored += 1;
+            }
+        }
+
+        restored
+    }
+}
+
+/// The window that currently has focus, unless it belongs to this process —
+/// a hotkey pressed while our own UI is focused must not strip our own window.
+pub fn foreground_window() -> Option<isize>
+{
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.is_invalid() {
+            return None;
+        }
+
+        let mut process_id = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut process_id));
+        if process_id == std::process::id() {
+            return None;
+        }
+
+        Some(hwnd.0 as isize)
+    }
 }
 
 fn as_hwnd(hwnd: isize) -> HWND
 {
     HWND(hwnd as *mut std::ffi::c_void)
+}
+
+/// A window's current rectangle in desktop coordinates.
+pub fn window_rect(hwnd: isize) -> Option<RECT>
+{
+    unsafe {
+        let handle = as_hwnd(hwnd);
+        if !IsWindow(Some(handle)).as_bool() {
+            return None;
+        }
+
+        let mut rect = RECT::default();
+        GetWindowRect(handle, &mut rect).ok()?;
+        Some(rect)
+    }
+}
+
+/// Confines the pointer to the window's current rectangle. Best effort; the
+/// caller re-asserts on a heartbeat because Windows silently clears clips.
+pub fn clip_cursor_to_window(hwnd: isize) -> bool
+{
+    let Some(rect) = window_rect(hwnd) else {
+        return false;
+    };
+
+    unsafe { ClipCursor(Some(&rect)).is_ok() }
+}
+
+pub fn release_cursor_clip()
+{
+    unsafe {
+        let _ = ClipCursor(None);
+    }
+}
+
+pub fn is_topmost(hwnd: isize) -> bool
+{
+    unsafe { (GetWindowLongW(as_hwnd(hwnd), GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0) != 0 }
+}
+
+/// Dims a window by making it layered with the given alpha. Refuses windows
+/// that are already layered — those manage their own transparency, and this
+/// app must not clobber it. Returns whether the window is now dimmed *by us*.
+pub fn dim_window(hwnd: isize, alpha: u8) -> bool
+{
+    unsafe {
+        let handle = as_hwnd(hwnd);
+        if !IsWindow(Some(handle)).as_bool() {
+            return false;
+        }
+
+        let exstyle = GetWindowLongW(handle, GWL_EXSTYLE) as u32;
+        if (exstyle & WS_EX_LAYERED.0) != 0 {
+            return false;
+        }
+
+        SetWindowLongW(handle, GWL_EXSTYLE, (exstyle | WS_EX_LAYERED.0) as i32);
+
+        if SetLayeredWindowAttributes(handle, COLORREF(0), alpha, LWA_ALPHA).is_err() {
+            // Leave no half-applied state behind.
+            SetWindowLongW(handle, GWL_EXSTYLE, exstyle as i32);
+            return false;
+        }
+
+        true
+    }
+}
+
+/// Undoes [`dim_window`]: full opacity, then the layered bit comes back off.
+pub fn undim_window(hwnd: isize)
+{
+    unsafe {
+        let handle = as_hwnd(hwnd);
+        if !IsWindow(Some(handle)).as_bool() {
+            return;
+        }
+
+        let _ = SetLayeredWindowAttributes(handle, COLORREF(0), 255, LWA_ALPHA);
+
+        let exstyle = GetWindowLongW(handle, GWL_EXSTYLE) as u32;
+        SetWindowLongW(handle, GWL_EXSTYLE, (exstyle & !WS_EX_LAYERED.0) as i32);
+    }
+}
+
+/// Whether the taskbar is currently set to auto-hide.
+pub fn taskbar_autohide_state() -> Option<bool>
+{
+    unsafe {
+        let mut data =
+            APPBARDATA { cbSize: std::mem::size_of::<APPBARDATA>() as u32, ..Default::default() };
+        let state = SHAppBarMessage(ABM_GETSTATE, &mut data) as u32;
+        Some((state & ABS_AUTOHIDE) != 0)
+    }
+}
+
+pub fn set_taskbar_autohide(enabled: bool)
+{
+    unsafe {
+        let mut data = APPBARDATA {
+            cbSize: std::mem::size_of::<APPBARDATA>() as u32,
+            lParam: LPARAM(if enabled { ABS_AUTOHIDE } else { ABS_ALWAYSONTOP } as isize),
+            ..Default::default()
+        };
+        let _ = SHAppBarMessage(ABM_SETSTATE, &mut data);
+    }
+}
+
+/// The top-level window under the mouse, for hover detection.
+pub fn cursor_root_window() -> Option<isize>
+{
+    unsafe {
+        let mut point = POINT::default();
+        GetCursorPos(&mut point).ok()?;
+
+        let hwnd = WindowFromPoint(point);
+        if hwnd.is_invalid() {
+            return None;
+        }
+
+        let root = GetAncestor(hwnd, GA_ROOT);
+        if root.is_invalid() { Some(hwnd.0 as isize) } else { Some(root.0 as isize) }
+    }
+}
+
+/// This app's own top-level window. Used for operations that must bypass
+/// winit: showing and hiding from the tray has to work even when eframe is not
+/// producing frames, which is exactly when the window is hidden.
+///
+/// Matched by process id and title, not title alone — `FindWindowW` by title
+/// could hand back some other window that merely shares the name (say, an
+/// Explorer folder called "ultraborderless"), and hiding that would be bad.
+fn own_window_handle() -> Option<HWND>
+{
+    struct FindContext
+    {
+        pid: u32,
+        found: Option<HWND>,
+    }
+
+    unsafe extern "system" fn find_proc(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL
+    {
+        unsafe {
+            let context = &mut *(lparam.0 as *mut FindContext);
+
+            let mut process_id = 0u32;
+            GetWindowThreadProcessId(hwnd, Some(&mut process_id));
+            if process_id != context.pid {
+                return true.into();
+            }
+
+            let mut title_buffer = [0u16; 64];
+            let title_len = GetWindowTextW(hwnd, &mut title_buffer);
+            if title_len > 0
+                && String::from_utf16_lossy(&title_buffer[..title_len as usize])
+                    == env!("CARGO_PKG_NAME")
+            {
+                context.found = Some(hwnd);
+                return false.into();
+            }
+
+            true.into()
+        }
+    }
+
+    let mut context = FindContext { pid: std::process::id(), found: None };
+
+    unsafe {
+        // Returns Err when the callback stops the enumeration early — which is
+        // the success case here.
+        let _ = EnumWindows(Some(find_proc), LPARAM(&mut context as *mut FindContext as isize));
+    }
+
+    context.found
+}
+
+/// Shows or hides this app's own window directly through Win32.
+pub fn set_own_window_visible(visible: bool)
+{
+    let Some(hwnd) = own_window_handle() else {
+        return;
+    };
+
+    unsafe {
+        let _ = ShowWindow(hwnd, if visible { SW_RESTORE } else { SW_HIDE });
+        if visible {
+            let _ = SetForegroundWindow(hwnd);
+        }
+    }
+}
+
+pub fn own_window_visible() -> bool
+{
+    match own_window_handle() {
+        Some(hwnd) => unsafe { IsWindowVisible(hwnd).as_bool() },
+        None => false,
+    }
 }
 
 /// Switches this app's own title bar to the dark variant.
@@ -442,17 +865,10 @@ fn as_hwnd(hwnd: isize) -> HWND
 /// light mode gets a white title bar above a dark window.
 pub fn use_dark_titlebar_for_own_window() -> bool
 {
-    let mut title: Vec<u16> = env!("CARGO_PKG_NAME").encode_utf16().collect();
-    title.push(0);
-
     unsafe {
-        let Ok(hwnd) = FindWindowW(PCWSTR::null(), PCWSTR(title.as_ptr())) else {
+        let Some(hwnd) = own_window_handle() else {
             return false;
         };
-
-        if hwnd.is_invalid() {
-            return false;
-        }
 
         // The attribute takes a Win32 BOOL, which is a 32-bit int.
         let enabled: i32 = 1;
@@ -510,11 +926,8 @@ unsafe extern "system" fn enum_windows_proc(hwnd: HWND, lparam: LPARAM) -> windo
         let mut process_id = 0u32;
         GetWindowThreadProcessId(hwnd, Some(&mut process_id));
 
-        let process_name = context
-            .processes
-            .get(&process_id)
-            .cloned()
-            .unwrap_or_else(|| "Unknown".to_string());
+        let process_name =
+            context.processes.get(&process_id).cloned().unwrap_or_else(|| "Unknown".to_string());
 
         if process_name.eq_ignore_ascii_case(env!("CARGO_PKG_NAME")) {
             return true.into();
@@ -523,12 +936,21 @@ unsafe extern "system" fn enum_windows_proc(hwnd: HWND, lparam: LPARAM) -> windo
         let current_style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
         let is_borderless = (current_style & BORDER_STYLES) == 0;
 
+        let mut class_buffer = [0u16; 256];
+        let class_len = GetClassNameW(hwnd, &mut class_buffer);
+        let class_name = if class_len > 0 {
+            String::from_utf16_lossy(&class_buffer[..class_len as usize])
+        } else {
+            String::new()
+        };
+
         let icon_data = extract_window_icon(hwnd);
 
         context.windows.push(WindowInfo {
             hwnd: hwnd.0 as isize,
             title,
             process_name,
+            class_name,
             is_borderless,
             icon_data,
         });
@@ -581,20 +1003,36 @@ unsafe extern "system" fn enum_monitors_proc(
     unsafe {
         let displays = &mut *(lparam.0 as *mut Vec<DisplayInfo>);
 
-        let mut monitor_info =
-            MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        // The EXW variant additionally carries the adapter device name, which is
+        // the only stable identity a monitor has across replug/re-enumeration.
+        let mut monitor_info = MONITORINFOEXW {
+            monitorInfo: MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFOEXW>() as u32,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
 
-        if GetMonitorInfoW(hmonitor, &mut monitor_info).as_bool() {
-            let width = monitor_info.rcMonitor.right - monitor_info.rcMonitor.left;
-            let height = monitor_info.rcMonitor.bottom - monitor_info.rcMonitor.top;
-            let is_primary = (monitor_info.dwFlags & MONITORINFOF_PRIMARY) != 0;
+        if GetMonitorInfoW(hmonitor, &mut monitor_info.monitorInfo).as_bool() {
+            let info = &monitor_info.monitorInfo;
+            let width = info.rcMonitor.right - info.rcMonitor.left;
+            let height = info.rcMonitor.bottom - info.rcMonitor.top;
+            let is_primary = (info.dwFlags & MONITORINFOF_PRIMARY) != 0;
+
+            let device_len = monitor_info
+                .szDevice
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(monitor_info.szDevice.len());
+            let device_name = String::from_utf16_lossy(&monitor_info.szDevice[..device_len]);
 
             let name = format!("Display {}", displays.len() + 1);
 
             displays.push(DisplayInfo {
                 name,
-                x: monitor_info.rcMonitor.left,
-                y: monitor_info.rcMonitor.top,
+                device_name,
+                x: info.rcMonitor.left,
+                y: info.rcMonitor.top,
                 width,
                 height,
                 is_primary,
@@ -774,6 +1212,7 @@ mod tests
     {
         DisplayInfo {
             name: "Display 1".to_string(),
+            device_name: r"\\.\DISPLAY1".to_string(),
             x: 0,
             y: 0,
             width: 7680,
@@ -807,11 +1246,8 @@ mod tests
         assert_eq!(region(3840, 2160, Anchor::Left).resolve(&display).unwrap().left, 0);
         assert_eq!(region(3840, 2160, Anchor::Right).resolve(&display).unwrap().left, 3840);
 
-        let custom = Placement {
-            custom_x: 100,
-            custom_y: 50,
-            ..region(1920, 1080, Anchor::Custom)
-        };
+        let custom =
+            Placement { custom_x: 100, custom_y: 50, ..region(1920, 1080, Anchor::Custom) };
         let rect = custom.resolve(&display).unwrap();
         assert_eq!((rect.left, rect.top), (100, 50));
     }
@@ -927,6 +1363,59 @@ mod tests
         }
     }
 
+    /// Dimming must round-trip cleanly and never touch a window that manages
+    /// its own transparency.
+    #[test]
+    fn dim_round_trips_and_refuses_already_layered_windows()
+    {
+        use windows::Win32::UI::WindowsAndMessaging::GetLayeredWindowAttributes;
+
+        unsafe {
+            let hwnd = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                w!("ultraborderless-dim-test"),
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                0,
+                0,
+                200,
+                150,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("create test window");
+
+            let handle = hwnd.0 as isize;
+
+            assert!(dim_window(handle, 102), "dim should succeed on a plain window");
+            assert_ne!(
+                GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_LAYERED.0,
+                0,
+                "dim should set the layered bit"
+            );
+
+            let mut alpha = 0u8;
+            GetLayeredWindowAttributes(hwnd, None, Some(&mut alpha), None)
+                .expect("read alpha back");
+            assert_eq!(alpha, 102);
+
+            // Already layered (by us, but indistinguishable from an app's own
+            // layering) — a second dim must refuse.
+            assert!(!dim_window(handle, 50));
+
+            undim_window(handle);
+            assert_eq!(
+                GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_LAYERED.0,
+                0,
+                "undim should clear the layered bit"
+            );
+
+            let _ = DestroyWindow(hwnd);
+        }
+    }
+
     /// Handles are recycled, so acting on a dead one could hit an unrelated window.
     #[test]
     fn rejects_a_handle_that_is_not_a_window()
@@ -935,5 +1424,33 @@ mod tests
         let placement = Placement::default();
         assert!(manager.toggle_borderless(0, &placement, None).is_err());
         assert!(manager.toggle_borderless(0xDEAD_BEEF, &placement, None).is_err());
+    }
+
+    /// Device name wins, a stale index clamps, and an empty list yields nothing.
+    #[test]
+    fn resolve_display_prefers_device_name_over_index()
+    {
+        let displays = vec![
+            ultrawide(),
+            DisplayInfo {
+                name: "Display 2".to_string(),
+                device_name: r"\\.\DISPLAY2".to_string(),
+                is_primary: false,
+                ..ultrawide()
+            },
+        ];
+
+        let by_device = resolve_display(&displays, r"\\.\DISPLAY2", 0).unwrap();
+        assert_eq!(by_device.device_name, r"\\.\DISPLAY2");
+
+        // Unknown device falls back to the index.
+        let by_index = resolve_display(&displays, r"\\.\DISPLAY9", 1).unwrap();
+        assert_eq!(by_index.device_name, r"\\.\DISPLAY2");
+
+        // A stale index clamps instead of failing.
+        let clamped = resolve_display(&displays, "", 7).unwrap();
+        assert_eq!(clamped.device_name, r"\\.\DISPLAY2");
+
+        assert!(resolve_display(&[], r"\\.\DISPLAY1", 0).is_none());
     }
 }
