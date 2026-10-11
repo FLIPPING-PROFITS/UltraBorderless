@@ -1,0 +1,41 @@
+name: Build UltraBorderless for Windows
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Check out exact repository version
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify tests
+        run: cargo test --locked
+
+      - name: Compile Windows executable
+        run: cargo build --release --locked
+
+      - name: Generate SHA256 checksum
+        shell: pwsh
+        run: |
+          $exe = "target/release/ultraborderless.exe"
+          if (-not (Test-Path $exe)) { throw "Executable missing: $exe" }
+          $hash = (Get-FileHash -Path $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  ultraborderless.exe" | Set-Content -Path SHA256SUMS.txt -Encoding ascii
+
+      - name: Provide executable and checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: UltraBorderless-Windows
+          path: |
+            target/release/ultraborderless.exe
+            SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
